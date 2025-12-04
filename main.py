@@ -8,58 +8,46 @@ from jinja2 import Environment, FileSystemLoader
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from database import (
-    add_user,
-    get_user,
-    set_subscription,
-    add_payment,
-    get_all_users,
-    get_expired_users,
-    add_promocode,
-    get_promocode,
+    add_user, get_user, set_subscription, add_payment, get_all_users, 
+    get_expired_users, add_promocode, get_promocode
 )
 from payments.click import create_click_link, verify_click
 from payments.payme import create_payme_invoice, verify_payme
 from scheduler import auto_kick_task
 from config import BOT_TOKEN, ADMIN_PASSWORD, CHANNEL_ID, DOMAIN, TEST_MODE
 
-# Initialize bot and dispatcher
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# Initialize FastAPI app and templates
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Environment(loader=FileSystemLoader("templates"))
 
-# -----------------------------
 # Admin dashboard
-# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 async def admin_index(request: Request, pw: str = ""):
     if pw != ADMIN_PASSWORD:
         return HTMLResponse("<h3>Unauthorized — use ?pw=ADMIN_PASSWORD</h3>")
     users = get_all_users()
-    import database
-    cur = database.cur
+    cur = __import__("database").cur
     cur.execute("SELECT id, user_id, amount, method, created_at FROM payments ORDER BY created_at DESC")
     payments = cur.fetchall()
     t = templates.get_template("admin.html")
     return HTMLResponse(t.render(users=users, payments=payments, admin_pw=ADMIN_PASSWORD))
 
-
 @app.post("/add_promocode")
 async def add_promocode_endpoint(
-    code: str = Form(...), bonus: int = Form(...), discount: int = Form(...), pw: str = Form(...)
+    code: str = Form(...),
+    bonus: int = Form(...),
+    discount: int = Form(...),
+    pw: str = Form(...)
 ):
     if pw != ADMIN_PASSWORD:
         return HTMLResponse("<h3>Unauthorized</h3>")
     add_promocode(code, bonus, discount)
     return JSONResponse({"status": "ok"})
 
-
-# -----------------------------
 # Telegram webhook
-# -----------------------------
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -67,25 +55,18 @@ async def telegram_webhook(request: Request):
     await dp.process_update(update)
     return JSONResponse({"ok": True})
 
-
-# -----------------------------
 # Create invoice endpoints
-# -----------------------------
 @app.get("/create_invoice/click/{user_id}/{amount}")
 async def create_click_invoice(user_id: int, amount: int):
     url = create_click_link(amount, user_id)
     return JSONResponse({"url": url})
-
 
 @app.get("/create_invoice/payme/{user_id}/{amount}")
 async def create_payme_invoice(user_id: int, amount: int):
     url = create_payme_invoice(amount, user_id)
     return JSONResponse({"url": url})
 
-
-# -----------------------------
 # Click callback
-# -----------------------------
 @app.post("/click/callback")
 async def click_callback(request: Request):
     try:
@@ -96,32 +77,30 @@ async def click_callback(request: Request):
     ok = verify_click(data)
     if not ok:
         return JSONResponse({"status": "error", "reason": "invalid sign"})
+    
     user_id = int(data.get("merchant_trans_id") or data.get("transaction_param") or 0)
     amount = int(float(data.get("amount", 0)))
     add_payment(user_id, amount, "click")
     months = 1 if amount == 20000 else 3 if amount == 55000 else 6 if amount == 100000 else 1
     set_subscription(user_id, months)
-    # send one-time invite
+    
     try:
         invite = await bot.create_chat_invite_link(chat_id=CHANNEL_ID, member_limit=1)
         await bot.send_message(user_id, f"✅ To'lov qabul qilindi. Kanalga kirish: {invite.invite_link}")
     except Exception:
         await bot.send_message(user_id, "To'lov qabul qilindi, ammo kanal linki yaratilmadi. Admin bilan bog'laning.")
+    
     return JSONResponse({"status": "success"})
 
-
-# -----------------------------
 # Payme callback
-# -----------------------------
 @app.post("/payme/callback")
 async def payme_callback(request: Request):
     body = await request.json()
-    # support test mode
+    q = request.query_params
     if TEST_MODE:
-        q = request.query_params
         user_id = int(q.get("params[account][order_id]") or body.get("params", {}).get("account", {}).get("order_id") or 0)
         amount = int((q.get("params[amount]") or body.get("params", {}).get("amount") or 0))
-        if amount and amount > 1000:
+        if amount > 1000:
             amount = int(amount / 100)
         add_payment(user_id, amount, "payme_test")
         months = 1 if amount == 20000 else 3 if amount == 55000 else 6 if amount == 100000 else 1
@@ -132,8 +111,7 @@ async def payme_callback(request: Request):
         except:
             pass
         return JSONResponse({"result": {"ok": True}})
-
-    # real Payme handling
+    
     method = body.get("method")
     if method == "PerformTransaction":
         params = body.get("params", {})
@@ -148,42 +126,37 @@ async def payme_callback(request: Request):
         except:
             pass
         return JSONResponse({"result": {"transaction": params.get("id")}})
+    
     return JSONResponse({"error": "unsupported"})
 
-
-# -----------------------------
-# BOT handlers
-# -----------------------------
+# Bot handlers
 @dp.message()
 async def handle_all(msg):
     text = (msg.text or "").strip()
     user_id = msg.from_user.id
     add_user(user_id, getattr(msg.from_user, "username", None))
-
+    
     if text.startswith("/start"):
         parts = text.split()
         if len(parts) > 1 and parts[1].isdigit():
             ref = int(parts[1])
-            import database
-            database.add_referral(user_id, ref)
-        import database
-        if database.is_active(user_id):
+            __import__("database").add_referral(user_id, ref)
+        if __import__("database").is_active(user_id):
             await msg.reply("Sizda faol obuna mavjud ✅")
         else:
             await msg.reply("Obuna yo'q. /buy 1 — 1 oy, /buy 3 — 3 oy, /buy 6 — 6 oy")
-
+    
     elif text.startswith("/buy"):
         parts = text.split()
         months = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
         amount = 20000 if months == 1 else 55000 if months == 3 else 100000
         click_url = create_click_link(amount, user_id)
         payme_url = create_payme_invoice(amount, user_id)
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("Click", url=click_url))
-        kb.add(InlineKeyboardButton("Payme", url=payme_url))
+        kb = __import__("aiogram").types.InlineKeyboardMarkup()
+        kb.add(__import__("aiogram").types.InlineKeyboardButton("Click", url=click_url))
+        kb.add(__import__("aiogram").types.InlineKeyboardButton("Payme", url=payme_url))
         await msg.reply(f"To'lov uchun tanlang: {amount} so'm", reply_markup=kb)
-
+    
     elif text.startswith("/promo"):
         parts = text.split()
         if len(parts) < 2:
@@ -197,18 +170,14 @@ async def handle_all(msg):
         bonus, discount = p
         set_subscription(user_id, bonus)
         await msg.reply(f"Promo qabul qilindi! +{bonus} oy qo'shildi.")
-
+    
     elif text == "/check":
-        import database
-        if database.is_active(user_id):
+        if __import__("database").is_active(user_id):
             await msg.reply("Sizda faol obuna mavjud ✅")
         else:
             await msg.reply("Obuna topilmadi ❌")
 
-
-# -----------------------------
 # Startup and shutdown events
-# -----------------------------
 @app.on_event("startup")
 async def on_startup():
     if DOMAIN:
@@ -220,7 +189,6 @@ async def on_startup():
             print("Webhook set error:", e)
     loop = asyncio.get_event_loop()
     loop.create_task(auto_kick_task())
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
