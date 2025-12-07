@@ -22,16 +22,21 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Environment(loader=FileSystemLoader("templates"))
 
+# -------------------- Admin Panel --------------------
+
 @app.get("/", response_class=HTMLResponse)
 async def admin_index(request: Request, pw: str = ""):
     if pw != ADMIN_PASSWORD:
         return HTMLResponse("<h3>Unauthorized — use ?pw=ADMIN_PASSWORD</h3>")
+
     users = get_all_users()
     cur = __import__("database").cur
     cur.execute("SELECT id, user_id, amount, method, created_at FROM payments ORDER BY created_at DESC")
     payments = cur.fetchall()
+
     t = templates.get_template("admin.html")
     return HTMLResponse(t.render(users=users, payments=payments, admin_pw=ADMIN_PASSWORD))
+
 
 @app.post("/add_promocode")
 async def add_promocode_endpoint(
@@ -45,6 +50,9 @@ async def add_promocode_endpoint(
     add_promocode(code, bonus, discount)
     return JSONResponse({"status": "ok"})
 
+
+# -------------------- Telegram Webhook --------------------
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -52,15 +60,22 @@ async def telegram_webhook(request: Request):
     await dp.process_update(update)
     return JSONResponse({"ok": True})
 
+
+# -------------------- Payment Links --------------------
+
 @app.get("/create_invoice/click/{user_id}/{amount}")
 async def create_click_invoice(user_id: int, amount: int):
     url = create_click_link(amount, user_id)
     return JSONResponse({"url": url})
 
+
 @app.get("/create_invoice/payme/{user_id}/{amount}")
 async def create_payme_invoice(user_id: int, amount: int):
     url = create_payme_invoice(amount, user_id)
     return JSONResponse({"url": url})
+
+
+# -------------------- CLICK Callback --------------------
 
 @app.post("/click/callback")
 async def click_callback(request: Request):
@@ -78,31 +93,43 @@ async def click_callback(request: Request):
     amount = int(float(data.get("amount", 0)))
 
     add_payment(user_id, amount, "click")
-    months = 1 if amount == 20000 else 3 if amount == 55000 else 6 if amount == 100000 else 1
+
+    months = 1 if amount == 20000 else \
+             3 if amount == 55000 else \
+             6 if amount == 100000 else 1
+
     set_subscription(user_id, months)
 
     try:
         invite = await bot.create_chat_invite_link(chat_id=CHANNEL_ID, member_limit=1)
         await bot.send_message(user_id, f"✅ To'lov qabul qilindi. Kanalga kirish: {invite.invite_link}")
-    except Exception:
+    except:
         await bot.send_message(user_id, "To'lov qabul qilindi, ammo kanal linki yaratilmadi. Admin bilan bog'laning.")
 
     return JSONResponse({"status": "success"})
+
+
+# -------------------- PAYME Callback --------------------
 
 @app.post("/payme/callback")
 async def payme_callback(request: Request):
     body = await request.json()
     q = request.query_params
 
+    # TEST MODE
     if TEST_MODE:
         user_id = int(q.get("params[account][order_id]") or body.get("params", {}).get("account", {}).get("order_id") or 0)
-        amount = int((q.get("params[amount]") or body.get("params", {}).get("amount") or 0))
+        amount = int(q.get("params[amount]") or body.get("params", {}).get("amount") or 0)
 
         if amount > 1000:
             amount = int(amount / 100)
 
         add_payment(user_id, amount, "payme_test")
-        months = 1 if amount == 20000 else 3 if amount == 55000 else 6 if amount == 100000 else 1
+
+        months = 1 if amount == 20000 else \
+                 3 if amount == 55000 else \
+                 6 if amount == 100000 else 1
+
         set_subscription(user_id, months)
 
         try:
@@ -113,15 +140,19 @@ async def payme_callback(request: Request):
 
         return JSONResponse({"result": {"ok": True}})
 
+    # PRODUCTION: Payme real to'lov
     method = body.get("method")
-
     if method == "PerformTransaction":
         params = body.get("params", {})
         user_id = int(params.get("account", {}).get("order_id") or 0)
         amount = int(params.get("amount", 0) / 100)
 
         add_payment(user_id, amount, "payme")
-        months = 1 if amount == 20000 else 3 if amount == 55000 else 6 if amount == 100000 else 1
+
+        months = 1 if amount == 20000 else \
+                 3 if amount == 55000 else \
+                 6 if amount == 100000 else 1
+
         set_subscription(user_id, months)
 
         try:
@@ -134,6 +165,9 @@ async def payme_callback(request: Request):
 
     return JSONResponse({"error": "unsupported"})
 
+
+# -------------------- BOT HANDLERS --------------------
+
 @dp.message()
 async def handle_all(msg):
     text = (msg.text or "").strip()
@@ -145,8 +179,7 @@ async def handle_all(msg):
         parts = text.split()
 
         if len(parts) > 1 and parts[1].isdigit():
-            ref = int(parts[1])
-            __import__("database").add_referral(user_id, ref)
+            __import__("database").add_referral(user_id, int(parts[1]))
 
         if __import__("database").is_active(user_id):
             await msg.reply("Sizda faol obuna mavjud ✅")
@@ -173,9 +206,7 @@ async def handle_all(msg):
             await msg.reply("Promo kod yuboring: /promo CODE")
             return
 
-        code = parts[1].upper()
-        p = get_promocode(code)
-
+        p = get_promocode(parts[1].upper())
         if not p:
             await msg.reply("Promo kod topilmadi.")
             return
@@ -190,6 +221,9 @@ async def handle_all(msg):
         else:
             await msg.reply("Obuna topilmadi ❌")
 
+
+# -------------------- STARTUP & SHUTDOWN --------------------
+
 @app.on_event("startup")
 async def on_startup():
     if DOMAIN:
@@ -198,10 +232,11 @@ async def on_startup():
             await bot.set_webhook(webhook_url)
             print("Webhook set to", webhook_url)
         except Exception as e:
-            print("Webhook set error:", e)
+            print("Webhook error:", e)
 
     loop = asyncio.get_event_loop()
     loop.create_task(auto_kick_task())
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
