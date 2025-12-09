@@ -19,7 +19,7 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Environment(loader=FileSystemLoader("templates"))
 
 # -------------------- Admin Panel --------------------
