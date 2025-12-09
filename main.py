@@ -2,10 +2,11 @@ import os
 import asyncio
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
-from aiogram import Bot, Dispatcher
-from aiogram.types import Update
+from aiogram import Bot, Dispatcher, Router
+from aiogram.types import Update, Message
+from fastapi.staticfiles import StaticFiles
+
 from database import (
     add_user, get_user, set_subscription, add_payment, get_all_users,
     get_expired_users, add_promocode, get_promocode
@@ -17,9 +18,10 @@ from config import BOT_TOKEN, ADMIN_PASSWORD, CHANNEL_ID, DOMAIN, TEST_MODE
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
 app = FastAPI()
-# app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Environment(loader=FileSystemLoader("templates"))
 
 # -------------------- Admin Panel --------------------
@@ -57,7 +59,7 @@ async def add_promocode_endpoint(
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update(**data)
-    await dp.process_update(update)
+    await dp.feed_update(bot, update)       # Aiogram 3.x to‘g‘ri ishlashi uchun
     return JSONResponse({"ok": True})
 
 
@@ -116,10 +118,9 @@ async def payme_callback(request: Request):
     body = await request.json()
     q = request.query_params
 
-    # TEST MODE
     if TEST_MODE:
         user_id = int(q.get("params[account][order_id]") or body.get("params", {}).get("account", {}).get("order_id") or 0)
-        amount = int(q.get("params[amount]") or body.get("params", {}).get("amount") or 0)
+        amount = int(q.get("params[amount]") or body.get("params", {}).get("amount", 0))
 
         if amount > 1000:
             amount = int(amount / 100)
@@ -140,7 +141,6 @@ async def payme_callback(request: Request):
 
         return JSONResponse({"result": {"ok": True}})
 
-    # PRODUCTION: Payme real to'lov
     method = body.get("method")
     if method == "PerformTransaction":
         params = body.get("params", {})
@@ -168,8 +168,8 @@ async def payme_callback(request: Request):
 
 # -------------------- BOT HANDLERS --------------------
 
-@dp.message()
-async def handle_all(msg):
+@router.message()
+async def handle_all(msg: Message):
     text = (msg.text or "").strip()
     user_id = msg.from_user.id
 
@@ -182,9 +182,9 @@ async def handle_all(msg):
             __import__("database").add_referral(user_id, int(parts[1]))
 
         if __import__("database").is_active(user_id):
-            await msg.reply("Sizda faol obuna mavjud ✅")
+            await msg.answer("Sizda faol obuna mavjud ✅")
         else:
-            await msg.reply("Obuna yo'q. /buy 1 — 1 oy, /buy 3 — 3 oy, /buy 6 — 6 oy")
+            await msg.answer("Obuna yo'q. /buy 1 — 1 oy, /buy 3 — 3 oy, /buy 6 — 6 oy")
 
     elif text.startswith("/buy"):
         parts = text.split()
@@ -194,32 +194,34 @@ async def handle_all(msg):
         click_url = create_click_link(amount, user_id)
         payme_url = create_payme_invoice(amount, user_id)
 
-        kb = __import__("aiogram").types.InlineKeyboardMarkup()
-        kb.add(__import__("aiogram").types.InlineKeyboardButton("Click", url=click_url))
-        kb.add(__import__("aiogram").types.InlineKeyboardButton("Payme", url=payme_url))
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Click", url=click_url)],
+            [InlineKeyboardButton(text="Payme", url=payme_url)]
+        ])
 
-        await msg.reply(f"To'lov uchun tanlang: {amount} so'm", reply_markup=kb)
+        await msg.answer(f"To'lov uchun tanlang: {amount} so'm", reply_markup=kb)
 
     elif text.startswith("/promo"):
         parts = text.split()
         if len(parts) < 2:
-            await msg.reply("Promo kod yuboring: /promo CODE")
+            await msg.answer("Promo kod yuboring: /promo CODE")
             return
 
         p = get_promocode(parts[1].upper())
         if not p:
-            await msg.reply("Promo kod topilmadi.")
+            await msg.answer("Promo kod topilmadi.")
             return
 
         bonus, discount = p
         set_subscription(user_id, bonus)
-        await msg.reply(f"Promo qabul qilindi! +{bonus} oy qo'shildi.")
+        await msg.answer(f"Promo qabul qilindi! +{bonus} oy qo'shildi.")
 
     elif text == "/check":
         if __import__("database").is_active(user_id):
-            await msg.reply("Sizda faol obuna mavjud ✅")
+            await msg.answer("Sizda faol obuna mavjud ✅")
         else:
-            await msg.reply("Obuna topilmadi ❌")
+            await msg.answer("Obuna topilmadi ❌")
 
 
 # -------------------- STARTUP & SHUTDOWN --------------------
@@ -234,8 +236,7 @@ async def on_startup():
         except Exception as e:
             print("Webhook error:", e)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(auto_kick_task())
+    asyncio.get_event_loop().create_task(auto_kick_task())
 
 
 @app.on_event("shutdown")
